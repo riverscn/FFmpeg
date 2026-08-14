@@ -52,6 +52,8 @@ int ff_rtp_parse_packet(RTPDemuxContext *s, AVPacket *pkt,
 void ff_rtp_parse_close(RTPDemuxContext *s);
 int64_t ff_rtp_queued_packet_time(RTPDemuxContext *s);
 void ff_rtp_reset_packet_queue(RTPDemuxContext *s);
+/** Reset queued RTP packets and payload-parser state after an in-session seek. */
+void ff_rtp_reset_after_seek(RTPDemuxContext *s);
 
 /**
  * Send a dummy packet on both port pairs to set up the connection
@@ -132,6 +134,8 @@ struct RTPDynamicProtocolHandler {
       * Don't free the protocol_data pointer itself, that is freed by the
       * caller. This is called even if the init method failed. */
     void (*close)(PayloadContext *protocol_data);
+    /** Reset buffered depacketizer/demux state after an in-session seek. */
+    void (*reset)(PayloadContext *protocol_data);
     /** Parse handler for this dynamic packet */
     DynamicPayloadPacketHandlerProc parse_packet;
     int (*need_keyframe)(PayloadContext *context);

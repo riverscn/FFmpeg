@@ -3210,6 +3210,27 @@ static void finished_reading_packet(AVFormatContext *s, int raw_packet_size)
         avio_skip(pb, skip);
 }
 
+static void mpegts_reset_parser_state(MpegTSContext *ts)
+{
+    int i;
+
+    for (i = 0; i < NB_PID_MAX; i++) {
+        MpegTSFilter *filter = ts->pids[i];
+
+        if (!filter)
+            continue;
+        if (filter->type == MPEGTS_PES) {
+            PESContext *pes = filter->u.pes_filter.opaque;
+            reset_pes_packet_state(pes);
+            pes->state = MPEGTS_SKIP; /* skip until the next PES header */
+        } else if (filter->type == MPEGTS_SECTION) {
+            filter->u.section_filter.last_ver = -1;
+        }
+        filter->last_cc  = -1;
+        filter->last_pcr = -1;
+    }
+}
+
 static int handle_packets(MpegTSContext *ts, int64_t nb_packets)
 {
     AVFormatContext *s = ts->stream;
@@ -3219,23 +3240,8 @@ static int handle_packets(MpegTSContext *ts, int64_t nb_packets)
     int ret = 0;
 
     if (avio_tell(s->pb) != ts->last_pos) {
-        int i;
         av_log(ts->stream, AV_LOG_TRACE, "Skipping after seek\n");
-        /* seek detected, flush pes buffer */
-        for (i = 0; i < NB_PID_MAX; i++) {
-            if (ts->pids[i]) {
-                if (ts->pids[i]->type == MPEGTS_PES) {
-                    PESContext *pes = ts->pids[i]->u.pes_filter.opaque;
-                    av_buffer_unref(&pes->buffer);
-                    pes->data_index = 0;
-                    pes->state = MPEGTS_SKIP; /* skip until pes header */
-                } else if (ts->pids[i]->type == MPEGTS_SECTION) {
-                    ts->pids[i]->u.section_filter.last_ver = -1;
-                }
-                ts->pids[i]->last_cc = -1;
-                ts->pids[i]->last_pcr = -1;
-            }
-        }
+        mpegts_reset_parser_state(ts);
     }
 
     ts->stop_parse = 0;
@@ -3660,6 +3666,15 @@ int avpriv_mpegts_parse_packet(MpegTSContext *ts, AVPacket *pkt,
         }
     }
     return len1 - len;
+}
+
+void avpriv_mpegts_parse_reset(MpegTSContext *ts)
+{
+    if (!ts)
+        return;
+    mpegts_reset_parser_state(ts);
+    ts->stop_parse = 0;
+    ts->pkt = NULL;
 }
 
 void avpriv_mpegts_parse_close(MpegTSContext *ts)

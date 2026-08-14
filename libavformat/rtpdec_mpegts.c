@@ -47,6 +47,15 @@ static av_cold int mpegts_init(AVFormatContext *ctx, int st_index,
     return 0;
 }
 
+static void mpegts_reset_context(PayloadContext *data)
+{
+    if (!data)
+        return;
+    data->read_buf_index = 0;
+    data->read_buf_size  = 0;
+    avpriv_mpegts_parse_reset(data->ts);
+}
+
 static int mpegts_handle_packet(AVFormatContext *ctx, PayloadContext *data,
                                 AVStream *st, AVPacket *pkt, uint32_t *timestamp,
                                 const uint8_t *buf, int len, uint16_t seq,
@@ -95,5 +104,6 @@ const RTPDynamicProtocolHandler ff_mpegts_dynamic_handler = {
     .parse_packet      = mpegts_handle_packet,
     .init              = mpegts_init,
     .close             = mpegts_close_context,
+    .reset             = mpegts_reset_context,
     .static_payload_id = 33,
 };

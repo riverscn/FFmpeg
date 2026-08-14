@@ -13,6 +13,8 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/mathematics.h"
+#include "libavutil/mem.h"
+#include "libavformat/rtpdec_formats.h"
 #include "libavformat/rtsp.h"
 
 static void parse(RTSPMessageHeader *reply, RTSPState *rt, const char *line)
@@ -117,6 +119,46 @@ static void test_3gpp_interval_and_depth(void)
     av_assert0(rt.refplayer_timeshift_range_end == INT64_C(600) * AV_TIME_BASE);
 }
 
+static void test_typed_seek_range_serialization(void)
+{
+    char clock_target[] = "20260812T120000Z";
+    char invalid_clock_target[] = "2026-08-12T12:00:00Z";
+    RTSPState rt = {
+        .state = RTSP_STATE_SEEKING,
+        .seek_timestamp = INT64_C(123456789),
+    };
+    char buffer[128];
+
+    av_assert0(ff_rtsp_refplayer_build_seek_range(&rt, buffer,
+                                                  sizeof(buffer)) == 0);
+    av_assert0(!strcmp(buffer, "Range: npt=123.456-\r\n"));
+
+    rt.refplayer_seek_clock = clock_target;
+    av_assert0(ff_rtsp_refplayer_build_seek_range(&rt, buffer,
+                                                  sizeof(buffer)) == 0);
+    av_assert0(!strcmp(buffer, "Range: clock=20260812T120000Z-\r\n"));
+
+    rt.refplayer_seek_clock = invalid_clock_target;
+    av_assert0(ff_rtsp_refplayer_build_seek_range(&rt, buffer,
+                                                  sizeof(buffer)) < 0);
+}
+
+static void test_mpegts_depacketizer_has_seek_reset(void)
+{
+    const RTPDynamicProtocolHandler *handler = &ff_mpegts_dynamic_handler;
+    AVFormatContext format = { 0 };
+    PayloadContext *context = av_mallocz(handler->priv_data_size);
+
+    av_assert0(context);
+    av_assert0(handler->init);
+    av_assert0(handler->reset);
+    av_assert0(handler->close);
+    av_assert0(handler->init(&format, -1, context) == 0);
+    handler->reset(context);
+    handler->close(context);
+    av_free(context);
+}
+
 int main(void)
 {
     test_hms();
@@ -126,5 +168,7 @@ int main(void)
     test_duplicate_range_fails_closed();
     test_3gpp_depth();
     test_3gpp_interval_and_depth();
+    test_typed_seek_range_serialization();
+    test_mpegts_depacketizer_has_seek_reset();
     return 0;
 }

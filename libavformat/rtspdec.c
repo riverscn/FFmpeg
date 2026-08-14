@@ -32,6 +32,7 @@
 #include "demux.h"
 
 #include "internal.h"
+#include "mpegts.h"
 #include "network.h"
 #include "os_support.h"
 #include "rtpproto.h"
@@ -539,14 +540,59 @@ static int refplayer_rtsp_clock_target_is_canonical(const char *value)
     return 1;
 }
 
+int ff_rtsp_refplayer_build_seek_range(const RTSPState *rt,
+                                       char *buffer, size_t buffer_size)
+{
+    if (!rt || !buffer || !buffer_size)
+        return AVERROR(EINVAL);
+    if (rt->refplayer_seek_clock) {
+        if (!refplayer_rtsp_clock_target_is_canonical(rt->refplayer_seek_clock))
+            return AVERROR(EINVAL);
+        if (snprintf(buffer, buffer_size, "Range: clock=%s-\r\n",
+                     rt->refplayer_seek_clock) >= buffer_size)
+            return AVERROR(ENOSPC);
+    } else if (rt->state == RTSP_STATE_PAUSED) {
+        buffer[0] = 0;
+    } else if (snprintf(buffer, buffer_size,
+                        "Range: npt=%"PRId64".%03"PRId64"-\r\n",
+                        rt->seek_timestamp / AV_TIME_BASE,
+                        rt->seek_timestamp / (AV_TIME_BASE / 1000) % 1000)
+               >= buffer_size) {
+        return AVERROR(ENOSPC);
+    }
+    return 0;
+}
+
+static void refplayer_rtsp_drain_received_datagrams(URLContext *handle)
+{
+    int *fds = NULL;
+    int fd_count = 0;
+    uint8_t discard_buffer[2048];
+    int i;
+
+    if (!handle || ffurl_get_multi_file_handle(handle, &fds, &fd_count) < 0)
+        return;
+    for (i = 0; i < fd_count; i++) {
+        int discarded = 0;
+
+        while (discarded < 4096) {
+            const int ret = recv(fds[i], discard_buffer,
+                                 sizeof(discard_buffer), MSG_DONTWAIT);
+            if (ret <= 0)
+                break;
+            discarded++;
+        }
+    }
+    av_free(fds);
+}
+
 static int rtsp_read_play(AVFormatContext *s)
 {
     RTSPState *rt = s->priv_data;
     RTSPMessageHeader reply1, *reply = &reply1;
+    const int is_seek = rt->state == RTSP_STATE_SEEKING;
     int i;
     char cmd[MAX_URL_SIZE];
-    char *clock_seek = rt->refplayer_seek_clock;
-
     av_log(s, AV_LOG_DEBUG, "hello state=%d\n", rt->state);
     rt->nb_byes = 0;
 
@@ -563,34 +609,33 @@ static int rtsp_read_play(AVFormatContext *s)
         }
     }
     if (!(rt->server_type == RTSP_SERVER_REAL && rt->need_subscription)) {
+        rt->cur_transport_priv = NULL;
+        rt->recvbuf_pos = 0;
+        rt->recvbuf_len = 0;
         if (rt->transport == RTSP_TRANSPORT_RTP) {
             for (i = 0; i < rt->nb_rtsp_streams; i++) {
                 RTSPStream *rtsp_st = rt->rtsp_streams[i];
                 RTPDemuxContext *rtpctx = rtsp_st->transport_priv;
                 if (!rtpctx)
                     continue;
-                ff_rtp_reset_packet_queue(rtpctx);
+                if (is_seek && rtsp_st->rtp_handle)
+                    refplayer_rtsp_drain_received_datagrams(
+                        rtsp_st->rtp_handle);
+                ff_rtp_reset_after_seek(rtpctx);
                 rtpctx->last_sr.ntp_timestamp = AV_NOPTS_VALUE;
                 rtpctx->first_rtcp_ntp_time = AV_NOPTS_VALUE;
                 rtpctx->base_timestamp      = 0;
                 rtpctx->timestamp           = 0;
                 rtpctx->unwrapped_timestamp = 0;
                 rtpctx->rtcp_ts_offset      = 0;
+                rtpctx->range_start_offset  = 0;
             }
+        } else if (rt->transport == RTSP_TRANSPORT_RAW && rt->ts) {
+            avpriv_mpegts_parse_reset(rt->ts);
         }
-        if (clock_seek && !refplayer_rtsp_clock_target_is_canonical(clock_seek)) {
+        if (ff_rtsp_refplayer_build_seek_range(rt, cmd, sizeof(cmd)) < 0) {
             av_freep(&rt->refplayer_seek_clock);
             return AVERROR(EINVAL);
-        }
-        if (clock_seek) {
-            snprintf(cmd, sizeof(cmd), "Range: clock=%s-\r\n", clock_seek);
-        } else if (rt->state == RTSP_STATE_PAUSED) {
-            cmd[0] = 0;
-        } else {
-            snprintf(cmd, sizeof(cmd),
-                     "Range: npt=%"PRId64".%03"PRId64"-\r\n",
-                     rt->seek_timestamp / AV_TIME_BASE,
-                     rt->seek_timestamp / (AV_TIME_BASE / 1000) % 1000);
         }
         ff_rtsp_send_cmd(s, "PLAY", rt->control_uri, cmd, reply, NULL);
         av_freep(&rt->refplayer_seek_clock);
@@ -599,6 +644,7 @@ static int rtsp_read_play(AVFormatContext *s)
         }
         ff_rtsp_refplayer_update_timeshift(rt, reply);
         if (rt->transport == RTSP_TRANSPORT_RTP &&
+            reply->range_kind == REFPLAYER_RTSP_RANGE_NPT &&
             reply->range_start != AV_NOPTS_VALUE) {
             for (i = 0; i < rt->nb_rtsp_streams; i++) {
                 RTSPStream *rtsp_st = rt->rtsp_streams[i];

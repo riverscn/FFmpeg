@@ -501,6 +501,11 @@ void ff_rtsp_refplayer_update_timeshift(
     RTSPState *rt,
     const RTSPMessageHeader *reply
 );
+int ff_rtsp_refplayer_build_seek_range(
+    const RTSPState *rt,
+    char *buffer,
+    size_t buffer_size
+);
 
 #define RTSP_FLAG_FILTER_SRC  0x1    /**< Filter incoming UDP packets -
                                           receive packets only from the right

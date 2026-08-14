@@ -772,6 +772,13 @@ void ff_rtp_reset_packet_queue(RTPDemuxContext *s)
     s->prev_ret  = 0;
 }
 
+void ff_rtp_reset_after_seek(RTPDemuxContext *s)
+{
+    ff_rtp_reset_packet_queue(s);
+    if (s->handler && s->handler->reset)
+        s->handler->reset(s->dynamic_protocol_context);
+}
+
 static int enqueue_packet(RTPDemuxContext *s, uint8_t *buf, int len)
 {
     uint16_t seq   = AV_RB16(buf + 2);
