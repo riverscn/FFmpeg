@@ -772,6 +772,7 @@ SKIPHEADERS-$(CONFIG_NETWORK)            += network.h rtsp.h
 
 TESTPROGS = seek                                                        \
             url                                                         \
+            refplayer_rtsp_timeshift                                    \
             seek_utils
 #           async                                                       \
 

@@ -104,6 +104,11 @@ const AVOption ff_rtsp_options[] = {
     { "timeout", "set timeout (in microseconds) of socket I/O operations", OFFSET(stimeout), AV_OPT_TYPE_INT64, {.i64 = 0}, INT_MIN, INT64_MAX, DEC },
     COMMON_OPTS(),
     { "user_agent", "override User-Agent header", OFFSET(user_agent), AV_OPT_TYPE_STRING, {.str = LIBAVFORMAT_IDENT}, 0, 0, DEC },
+    { "refplayer_rtsp_timeshift_profile", "current RefPlayer RTSP time-shift profile", OFFSET(refplayer_timeshift_profile), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 3, DEC },
+    { "refplayer_rtsp_range_kind", "current RefPlayer RTSP time-shift range kind", OFFSET(refplayer_timeshift_range_kind), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 2, DEC },
+    { "refplayer_rtsp_range_start", "current RefPlayer RTSP time-shift range start in microseconds", OFFSET(refplayer_timeshift_range_start), AV_OPT_TYPE_INT64, {.i64 = AV_NOPTS_VALUE}, INT64_MIN, INT64_MAX, DEC },
+    { "refplayer_rtsp_range_end", "current RefPlayer RTSP time-shift range end in microseconds", OFFSET(refplayer_timeshift_range_end), AV_OPT_TYPE_INT64, {.i64 = AV_NOPTS_VALUE}, INT64_MIN, INT64_MAX, DEC },
+    { "refplayer_rtsp_horizon", "current RefPlayer rolling time-shift horizon in microseconds", OFFSET(refplayer_timeshift_horizon), AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, DEC },
 
     // TLS options
     FF_TLS_CLIENT_OPTIONS(RTSPState, tls_opts),
@@ -220,6 +225,215 @@ static void rtsp_parse_range_npt(const char *p, int64_t *start, int64_t *end)
         get_word_sep(buf, sizeof(buf), "-", &p);
         if (av_parse_time(end, buf, 1) < 0)
             av_log(NULL, AV_LOG_DEBUG, "Failed to parse interval end specification '%s'\n", buf);
+    }
+}
+
+static int refplayer_rtsp_parse_clock_endpoint(const char *value,
+                                               int64_t *timestamp)
+{
+    if (!value || !timestamp || !value[0])
+        return AVERROR(EINVAL);
+    if (!strcmp(value, "0")) {
+        *timestamp = 0;
+        return 0;
+    }
+    return av_parse_time(timestamp, value, 0);
+}
+
+static void refplayer_rtsp_parse_range(RTSPMessageHeader *reply,
+                                       const char *value);
+
+static int refplayer_rtsp_parse_prefixed_time(const char *value,
+                                              int *kind,
+                                              int64_t *timestamp)
+{
+    const char *p = value;
+
+    if (!value || !kind || !timestamp)
+        return AVERROR(EINVAL);
+    p += strspn(p, SPACE_CHARS);
+    if (av_stristart(p, "npt=", &p)) {
+        char *end = NULL;
+        const double seconds = strtod(p, &end);
+        if (end == p || !isfinite(seconds) || seconds < 0)
+            return AVERROR(EINVAL);
+        end += strspn(end, SPACE_CHARS);
+        if (*end)
+            return AVERROR(EINVAL);
+        *kind = REFPLAYER_RTSP_RANGE_NPT;
+        *timestamp = (int64_t)(seconds * AV_TIME_BASE);
+        return 0;
+    }
+    if (av_stristart(p, "clock=", &p) &&
+        refplayer_rtsp_parse_clock_endpoint(p, timestamp) >= 0) {
+        *kind = REFPLAYER_RTSP_RANGE_CLOCK;
+        return 0;
+    }
+    return AVERROR(EINVAL);
+}
+
+static int refplayer_rtsp_parse_3gpp_buffer(const char *value,
+                                           int *kind,
+                                           int64_t *start,
+                                           int64_t *end,
+                                           int64_t *depth)
+{
+    const char *p = value;
+    const char *depth_value;
+    RTSPMessageHeader parsed = { 0 };
+
+    if (!value || !kind || !start || !end || !depth)
+        return AVERROR(EINVAL);
+    *kind = REFPLAYER_RTSP_RANGE_NONE;
+    *start = *end = AV_NOPTS_VALUE;
+    *depth = 0;
+    p += strspn(p, SPACE_CHARS);
+
+    depth_value = av_stristr(p, "buffer-depth=");
+    if (depth_value) {
+        char *parse_end = NULL;
+        int64_t seconds;
+
+        depth_value += strlen("buffer-depth=");
+        seconds = strtoll(depth_value, &parse_end, 10);
+        if (parse_end == depth_value || seconds <= 0 ||
+            seconds > INT64_MAX / AV_TIME_BASE)
+            return AVERROR(EINVAL);
+        *depth = seconds * AV_TIME_BASE;
+    }
+
+    if (av_stristart(p, "npt=", NULL) || av_stristart(p, "clock=", NULL)) {
+        char range[256];
+        const char *semicolon = strchr(p, ';');
+        const size_t length = semicolon ? (size_t)(semicolon - p) : strlen(p);
+
+        if (!length || length >= sizeof(range))
+            return AVERROR(EINVAL);
+        memcpy(range, p, length);
+        range[length] = '\0';
+        refplayer_rtsp_parse_range(&parsed, range);
+        if (parsed.range_count != 1 ||
+            parsed.range_kind == REFPLAYER_RTSP_RANGE_NONE)
+            return AVERROR(EINVAL);
+        *kind = parsed.range_kind;
+        *start = parsed.range_start;
+        *end = parsed.range_end;
+    } else if (!depth_value) {
+        return AVERROR(EINVAL);
+    }
+    return 0;
+}
+
+void ff_rtsp_refplayer_update_timeshift(RTSPState *rt,
+                                        const RTSPMessageHeader *reply)
+{
+    int current_kind = REFPLAYER_RTSP_RANGE_NONE;
+    int buffer_kind = REFPLAYER_RTSP_RANGE_NONE;
+    int64_t current = AV_NOPTS_VALUE;
+    int64_t buffer_start = AV_NOPTS_VALUE;
+    int64_t buffer_end = AV_NOPTS_VALUE;
+    int64_t buffer_depth = 0;
+
+    if (!rt || !reply)
+        return;
+
+    if (reply->current_recording_time_count == 1 &&
+        reply->timeshift_buffer_count == 1 &&
+        refplayer_rtsp_parse_prefixed_time(reply->current_recording_time,
+                                           &current_kind, &current) >= 0 &&
+        refplayer_rtsp_parse_3gpp_buffer(reply->timeshift_buffer,
+                                        &buffer_kind, &buffer_start,
+                                        &buffer_end, &buffer_depth) >= 0) {
+        int64_t start = AV_NOPTS_VALUE;
+        int64_t end = current;
+
+        if (buffer_kind != REFPLAYER_RTSP_RANGE_NONE &&
+            buffer_kind != current_kind)
+            return;
+        if (buffer_start != AV_NOPTS_VALUE)
+            start = buffer_start;
+        if (buffer_end != AV_NOPTS_VALUE)
+            end = FFMIN(end, buffer_end);
+        if (buffer_depth > 0 && current >= buffer_depth)
+            start = start == AV_NOPTS_VALUE
+                ? current - buffer_depth
+                : FFMAX(start, current - buffer_depth);
+        if (start != AV_NOPTS_VALUE && end > start) {
+            rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_3GPP;
+            rt->refplayer_timeshift_range_kind = current_kind;
+            rt->refplayer_timeshift_range_start = start;
+            rt->refplayer_timeshift_range_end = end;
+            rt->refplayer_timeshift_horizon = end - start;
+            return;
+        }
+    }
+
+    if (reply->range_count != 1)
+        return;
+    if (reply->range_kind == REFPLAYER_RTSP_RANGE_NPT &&
+        reply->range_start != AV_NOPTS_VALUE &&
+        reply->range_end != AV_NOPTS_VALUE &&
+        reply->range_end > reply->range_start) {
+        rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_FINITE_RANGE;
+        rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_NPT;
+        rt->refplayer_timeshift_range_start = reply->range_start;
+        rt->refplayer_timeshift_range_end = reply->range_end;
+        rt->refplayer_timeshift_horizon = reply->range_end - reply->range_start;
+    } else if (reply->range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
+               reply->range_is_rolling &&
+               reply->timeshift_status_count == 1 &&
+               reply->timeshift_status == 1) {
+        rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_HMS;
+        rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_CLOCK;
+        rt->refplayer_timeshift_range_start = AV_NOPTS_VALUE;
+        rt->refplayer_timeshift_range_end = AV_NOPTS_VALUE;
+        rt->refplayer_timeshift_horizon = INT64_C(3) * 60 * 60 * AV_TIME_BASE;
+    } else if (reply->range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
+               reply->range_start != AV_NOPTS_VALUE &&
+               reply->range_end != AV_NOPTS_VALUE &&
+               reply->range_end > reply->range_start) {
+        rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_FINITE_RANGE;
+        rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_CLOCK;
+        rt->refplayer_timeshift_range_start = reply->range_start;
+        rt->refplayer_timeshift_range_end = reply->range_end;
+        rt->refplayer_timeshift_horizon = reply->range_end - reply->range_start;
+    }
+}
+
+static void refplayer_rtsp_parse_range(RTSPMessageHeader *reply,
+                                       const char *value)
+{
+    const char *p = value;
+    char start[128], end[128];
+
+    reply->range_count++;
+    if (reply->range_count != 1)
+        return;
+    reply->range_start = AV_NOPTS_VALUE;
+    reply->range_end = AV_NOPTS_VALUE;
+    p += strspn(p, SPACE_CHARS);
+    if (av_stristart(p, "npt=", &p)) {
+        rtsp_parse_range_npt(value, &reply->range_start, &reply->range_end);
+        if (reply->range_start != AV_NOPTS_VALUE)
+            reply->range_kind = REFPLAYER_RTSP_RANGE_NPT;
+        return;
+    }
+    if (!av_stristart(p, "clock=", &p))
+        return;
+
+    get_word_sep(start, sizeof(start), "-", &p);
+    if (refplayer_rtsp_parse_clock_endpoint(start, &reply->range_start) < 0)
+        return;
+    reply->range_kind = REFPLAYER_RTSP_RANGE_CLOCK;
+    reply->range_is_rolling = !strcmp(start, "0");
+    if (*p == '-') {
+        p++;
+        get_word_sep(end, sizeof(end), "-", &p);
+        if (end[0] && refplayer_rtsp_parse_clock_endpoint(end, &reply->range_end) < 0) {
+            reply->range_kind = REFPLAYER_RTSP_RANGE_NONE;
+            reply->range_start = AV_NOPTS_VALUE;
+            reply->range_end = AV_NOPTS_VALUE;
+        }
     }
 }
 
@@ -1152,7 +1366,24 @@ void ff_rtsp_parse_line(AVFormatContext *s,
     } else if (av_stristart(p, "CSeq:", &p)) {
         reply->seq = strtol(p, NULL, 10);
     } else if (av_stristart(p, "Range:", &p)) {
-        rtsp_parse_range_npt(p, &reply->range_start, &reply->range_end);
+        refplayer_rtsp_parse_range(reply, p);
+    } else if (av_stristart(p, "Timeshift-Status:", &p)) {
+        p += strspn(p, SPACE_CHARS);
+        reply->timeshift_status_count++;
+        if (reply->timeshift_status_count == 1 && !strcmp(p, "1"))
+            reply->timeshift_status = 1;
+    } else if (av_stristart(p, "3GPP-TS-CurrentRecording-Time:", &p)) {
+        p += strspn(p, SPACE_CHARS);
+        reply->current_recording_time_count++;
+        if (reply->current_recording_time_count == 1)
+            av_strlcpy(reply->current_recording_time, p,
+                       sizeof(reply->current_recording_time));
+    } else if (av_stristart(p, "3GPP-TS-Buffer:", &p)) {
+        p += strspn(p, SPACE_CHARS);
+        reply->timeshift_buffer_count++;
+        if (reply->timeshift_buffer_count == 1)
+            av_strlcpy(reply->timeshift_buffer, p,
+                       sizeof(reply->timeshift_buffer));
     } else if (av_stristart(p, "RealChallenge1:", &p)) {
         p += strspn(p, SPACE_CHARS);
         av_strlcpy(reply->real_challenge, p, sizeof(reply->real_challenge));

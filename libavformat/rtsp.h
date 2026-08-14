@@ -139,6 +139,21 @@ typedef struct RTSPMessageHeader {
      * AV_TIME_BASE unit, AV_NOPTS_VALUE if not used */
     int64_t range_start, range_end;
 
+    /** Parsed Range domain. Values are private to libavformat's RTSP
+     * implementation; zero means that no supported Range was present. */
+    int range_kind;
+    int range_is_rolling;
+    int range_count;
+
+    /** IPTV time-shift response evidence. Duplicate fields are retained as
+     * counts so callers can fail closed instead of accepting the last value. */
+    int timeshift_status;
+    int timeshift_status_count;
+    char current_recording_time[128];
+    int current_recording_time_count;
+    char timeshift_buffer[256];
+    int timeshift_buffer_count;
+
     /** describes the complete "Transport:" line of the server in response
      * to a SETUP RTSP command by the client */
     RTSPTransportField transports[RTSP_MAX_TRANSPORTS];
@@ -194,6 +209,19 @@ typedef struct RTSPMessageHeader {
     char stream_id[64];
 } RTSPMessageHeader;
 
+enum RefPlayerRTSPTimeshiftProfile {
+    REFPLAYER_RTSP_TIMESHIFT_NONE = 0,
+    REFPLAYER_RTSP_TIMESHIFT_FINITE_RANGE = 1,
+    REFPLAYER_RTSP_TIMESHIFT_3GPP = 2,
+    REFPLAYER_RTSP_TIMESHIFT_HMS = 3,
+};
+
+enum RefPlayerRTSPRangeKind {
+    REFPLAYER_RTSP_RANGE_NONE = 0,
+    REFPLAYER_RTSP_RANGE_NPT = 1,
+    REFPLAYER_RTSP_RANGE_CLOCK = 2,
+};
+
 /**
  * Client state, i.e. whether we are currently receiving data (PLAYING) or
  * setup-but-not-receiving (PAUSED). State can be changed in applications
@@ -245,6 +273,15 @@ typedef struct RTSPState {
      * whenever we resume playback. Either way, the value is only used once,
      * see rtsp_read_play() and rtsp_read_seek(). */
     int64_t seek_timestamp;
+
+    /** RefPlayer's narrow RTSP time-shift extension. These fields are exposed
+     * through private AVOptions so the embedding application can consume
+     * typed facts without depending on RTSPState layout or adding public ABI. */
+    int refplayer_timeshift_profile;
+    int refplayer_timeshift_range_kind;
+    int64_t refplayer_timeshift_range_start;
+    int64_t refplayer_timeshift_range_end;
+    int64_t refplayer_timeshift_horizon;
 
     int seq;                          /**< RTSP command sequence number */
 
@@ -453,6 +490,11 @@ typedef struct RTSPState {
         char *host;
     } tls_opts;
 } RTSPState;
+
+void ff_rtsp_refplayer_update_timeshift(
+    RTSPState *rt,
+    const RTSPMessageHeader *reply
+);
 
 #define RTSP_FLAG_FILTER_SRC  0x1    /**< Filter incoming UDP packets -
                                           receive packets only from the right
