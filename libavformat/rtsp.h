@@ -282,6 +282,11 @@ typedef struct RTSPState {
     int64_t refplayer_timeshift_range_start;
     int64_t refplayer_timeshift_range_end;
     int64_t refplayer_timeshift_horizon;
+    int refplayer_sdp_range_count;
+    int refplayer_sdp_range_kind;
+    int refplayer_sdp_range_is_rolling;
+    int64_t refplayer_sdp_range_start;
+    int64_t refplayer_sdp_range_end;
     char *refplayer_seek_clock;
 
     int seq;                          /**< RTSP command sequence number */

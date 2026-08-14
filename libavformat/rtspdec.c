@@ -775,6 +775,7 @@ int ff_rtsp_setup_input_streams(AVFormatContext *s, RTSPMessageHeader *reply)
     av_freep(&content);
     if (ret < 0)
         return ret;
+    ff_rtsp_refplayer_update_timeshift(rt, reply);
 
     return 0;
 }

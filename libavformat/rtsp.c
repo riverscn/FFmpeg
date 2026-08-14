@@ -334,6 +334,11 @@ void ff_rtsp_refplayer_update_timeshift(RTSPState *rt,
     int64_t buffer_start = AV_NOPTS_VALUE;
     int64_t buffer_end = AV_NOPTS_VALUE;
     int64_t buffer_depth = 0;
+    int range_count;
+    int range_kind;
+    int range_is_rolling;
+    int64_t range_start;
+    int64_t range_end;
 
     if (!rt || !reply)
         return;
@@ -369,19 +374,32 @@ void ff_rtsp_refplayer_update_timeshift(RTSPState *rt,
         }
     }
 
-    if (reply->range_count != 1)
+    range_count = reply->range_count;
+    range_kind = reply->range_kind;
+    range_is_rolling = reply->range_is_rolling;
+    range_start = reply->range_start;
+    range_end = reply->range_end;
+    if (range_count == 0 && rt->refplayer_sdp_range_count == 1) {
+        range_count = rt->refplayer_sdp_range_count;
+        range_kind = rt->refplayer_sdp_range_kind;
+        range_is_rolling = rt->refplayer_sdp_range_is_rolling;
+        range_start = rt->refplayer_sdp_range_start;
+        range_end = rt->refplayer_sdp_range_end;
+    }
+
+    if (range_count != 1)
         return;
-    if (reply->range_kind == REFPLAYER_RTSP_RANGE_NPT &&
-        reply->range_start != AV_NOPTS_VALUE &&
-        reply->range_end != AV_NOPTS_VALUE &&
-        reply->range_end > reply->range_start) {
+    if (range_kind == REFPLAYER_RTSP_RANGE_NPT &&
+        range_start != AV_NOPTS_VALUE &&
+        range_end != AV_NOPTS_VALUE &&
+        range_end > range_start) {
         rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_FINITE_RANGE;
         rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_NPT;
-        rt->refplayer_timeshift_range_start = reply->range_start;
-        rt->refplayer_timeshift_range_end = reply->range_end;
-        rt->refplayer_timeshift_horizon = reply->range_end - reply->range_start;
-    } else if (reply->range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
-               reply->range_is_rolling &&
+        rt->refplayer_timeshift_range_start = range_start;
+        rt->refplayer_timeshift_range_end = range_end;
+        rt->refplayer_timeshift_horizon = range_end - range_start;
+    } else if (range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
+               range_is_rolling &&
                reply->timeshift_status_count == 1 &&
                reply->timeshift_status == 1) {
         rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_HMS;
@@ -389,15 +407,15 @@ void ff_rtsp_refplayer_update_timeshift(RTSPState *rt,
         rt->refplayer_timeshift_range_start = AV_NOPTS_VALUE;
         rt->refplayer_timeshift_range_end = AV_NOPTS_VALUE;
         rt->refplayer_timeshift_horizon = INT64_C(3) * 60 * 60 * AV_TIME_BASE;
-    } else if (reply->range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
-               reply->range_start != AV_NOPTS_VALUE &&
-               reply->range_end != AV_NOPTS_VALUE &&
-               reply->range_end > reply->range_start) {
+    } else if (range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
+               range_start != AV_NOPTS_VALUE &&
+               range_end != AV_NOPTS_VALUE &&
+               range_end > range_start) {
         rt->refplayer_timeshift_profile = REFPLAYER_RTSP_TIMESHIFT_FINITE_RANGE;
         rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_CLOCK;
-        rt->refplayer_timeshift_range_start = reply->range_start;
-        rt->refplayer_timeshift_range_end = reply->range_end;
-        rt->refplayer_timeshift_horizon = reply->range_end - reply->range_start;
+        rt->refplayer_timeshift_range_start = range_start;
+        rt->refplayer_timeshift_range_end = range_end;
+        rt->refplayer_timeshift_horizon = range_end - range_start;
     }
 }
 
@@ -873,7 +891,24 @@ static void sdp_parse_line(AVFormatContext *s, SDPParseState *s1,
             get_word(buf1, sizeof(buf1), &p);
             rtsp_st->ssrc = strtoll(buf1, NULL, 10);
         } else if (av_strstart(p, "range:", &p)) {
+            RTSPMessageHeader range = { 0 };
             int64_t start, end;
+
+            refplayer_rtsp_parse_range(&range, p);
+            rt->refplayer_sdp_range_count++;
+            if (rt->refplayer_sdp_range_count == 1 &&
+                range.range_count == 1 &&
+                range.range_kind != REFPLAYER_RTSP_RANGE_NONE) {
+                rt->refplayer_sdp_range_kind = range.range_kind;
+                rt->refplayer_sdp_range_is_rolling = range.range_is_rolling;
+                rt->refplayer_sdp_range_start = range.range_start;
+                rt->refplayer_sdp_range_end = range.range_end;
+            } else {
+                rt->refplayer_sdp_range_kind = REFPLAYER_RTSP_RANGE_NONE;
+                rt->refplayer_sdp_range_is_rolling = 0;
+                rt->refplayer_sdp_range_start = AV_NOPTS_VALUE;
+                rt->refplayer_sdp_range_end = AV_NOPTS_VALUE;
+            }
 
             // this is so that seeking on a streamed file can work.
             rtsp_parse_range_npt(p, &start, &end);
@@ -965,12 +1000,18 @@ static void sdp_parse_line(AVFormatContext *s, SDPParseState *s1,
 
 int ff_sdp_parse(AVFormatContext *s, const char *content)
 {
+    RTSPState *rt = s->priv_data;
     const char *p;
     int letter, i;
     char buf[SDP_MAX_SIZE], *q;
     SDPParseState sdp_parse_state = { { 0 } }, *s1 = &sdp_parse_state;
 
     s->duration = AV_NOPTS_VALUE;
+    rt->refplayer_sdp_range_count = 0;
+    rt->refplayer_sdp_range_kind = REFPLAYER_RTSP_RANGE_NONE;
+    rt->refplayer_sdp_range_is_rolling = 0;
+    rt->refplayer_sdp_range_start = AV_NOPTS_VALUE;
+    rt->refplayer_sdp_range_end = AV_NOPTS_VALUE;
 
     p = content;
     for (;;) {
