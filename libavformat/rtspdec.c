@@ -524,12 +524,28 @@ int ff_rtsp_parse_streaming_commands(AVFormatContext *s)
     return ret;
 }
 
+static int refplayer_rtsp_clock_target_is_canonical(const char *value)
+{
+    size_t i;
+
+    if (!value || strlen(value) != 16 || value[8] != 'T' || value[15] != 'Z')
+        return 0;
+    for (i = 0; i < 15; i++) {
+        if (i == 8)
+            continue;
+        if (value[i] < '0' || value[i] > '9')
+            return 0;
+    }
+    return 1;
+}
+
 static int rtsp_read_play(AVFormatContext *s)
 {
     RTSPState *rt = s->priv_data;
     RTSPMessageHeader reply1, *reply = &reply1;
     int i;
     char cmd[MAX_URL_SIZE];
+    char *clock_seek = rt->refplayer_seek_clock;
 
     av_log(s, AV_LOG_DEBUG, "hello state=%d\n", rt->state);
     rt->nb_byes = 0;
@@ -562,7 +578,13 @@ static int rtsp_read_play(AVFormatContext *s)
                 rtpctx->rtcp_ts_offset      = 0;
             }
         }
-        if (rt->state == RTSP_STATE_PAUSED) {
+        if (clock_seek && !refplayer_rtsp_clock_target_is_canonical(clock_seek)) {
+            av_freep(&rt->refplayer_seek_clock);
+            return AVERROR(EINVAL);
+        }
+        if (clock_seek) {
+            snprintf(cmd, sizeof(cmd), "Range: clock=%s-\r\n", clock_seek);
+        } else if (rt->state == RTSP_STATE_PAUSED) {
             cmd[0] = 0;
         } else {
             snprintf(cmd, sizeof(cmd),
@@ -571,9 +593,11 @@ static int rtsp_read_play(AVFormatContext *s)
                      rt->seek_timestamp / (AV_TIME_BASE / 1000) % 1000);
         }
         ff_rtsp_send_cmd(s, "PLAY", rt->control_uri, cmd, reply, NULL);
+        av_freep(&rt->refplayer_seek_clock);
         if (reply->status_code != RTSP_STATUS_OK) {
             return ff_rtsp_averror(reply->status_code, -1);
         }
+        ff_rtsp_refplayer_update_timeshift(rt, reply);
         if (rt->transport == RTSP_TRANSPORT_RTP &&
             reply->range_start != AV_NOPTS_VALUE) {
             for (i = 0; i < rt->nb_rtsp_streams; i++) {

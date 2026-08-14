@@ -109,6 +109,7 @@ const AVOption ff_rtsp_options[] = {
     { "refplayer_rtsp_range_start", "current RefPlayer RTSP time-shift range start in microseconds", OFFSET(refplayer_timeshift_range_start), AV_OPT_TYPE_INT64, {.i64 = AV_NOPTS_VALUE}, INT64_MIN, INT64_MAX, DEC },
     { "refplayer_rtsp_range_end", "current RefPlayer RTSP time-shift range end in microseconds", OFFSET(refplayer_timeshift_range_end), AV_OPT_TYPE_INT64, {.i64 = AV_NOPTS_VALUE}, INT64_MIN, INT64_MAX, DEC },
     { "refplayer_rtsp_horizon", "current RefPlayer rolling time-shift horizon in microseconds", OFFSET(refplayer_timeshift_horizon), AV_OPT_TYPE_INT64, {.i64 = 0}, 0, INT64_MAX, DEC },
+    { "refplayer_rtsp_seek_clock", "one-shot canonical UTC clock target for the next RTSP seek", OFFSET(refplayer_seek_clock), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
 
     // TLS options
     FF_TLS_CLIENT_OPTIONS(RTSPState, tls_opts),
