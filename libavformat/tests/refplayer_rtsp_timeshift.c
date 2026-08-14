@@ -30,7 +30,7 @@ static void test_hms(void)
     ff_rtsp_refplayer_update_timeshift(&rt, &reply);
     av_assert0(rt.refplayer_timeshift_profile == REFPLAYER_RTSP_TIMESHIFT_HMS);
     av_assert0(rt.refplayer_timeshift_range_kind == REFPLAYER_RTSP_RANGE_CLOCK);
-    av_assert0(rt.refplayer_timeshift_horizon == INT64_C(10800) * AV_TIME_BASE);
+    av_assert0(rt.refplayer_timeshift_horizon == INT64_C(604800) * AV_TIME_BASE);
 }
 
 static void test_hms_sdp_range_with_describe_status(void)
@@ -44,7 +44,7 @@ static void test_hms_sdp_range_with_describe_status(void)
     ff_rtsp_refplayer_update_timeshift(&rt, &reply);
     av_assert0(rt.refplayer_timeshift_profile == REFPLAYER_RTSP_TIMESHIFT_HMS);
     av_assert0(rt.refplayer_timeshift_range_kind == REFPLAYER_RTSP_RANGE_CLOCK);
-    av_assert0(rt.refplayer_timeshift_horizon == INT64_C(10800) * AV_TIME_BASE);
+    av_assert0(rt.refplayer_timeshift_horizon == INT64_C(604800) * AV_TIME_BASE);
 }
 
 static void test_duplicate_sdp_range_fails_closed(void)

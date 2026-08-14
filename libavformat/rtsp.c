@@ -406,7 +406,7 @@ void ff_rtsp_refplayer_update_timeshift(RTSPState *rt,
         rt->refplayer_timeshift_range_kind = REFPLAYER_RTSP_RANGE_CLOCK;
         rt->refplayer_timeshift_range_start = AV_NOPTS_VALUE;
         rt->refplayer_timeshift_range_end = AV_NOPTS_VALUE;
-        rt->refplayer_timeshift_horizon = INT64_C(3) * 60 * 60 * AV_TIME_BASE;
+        rt->refplayer_timeshift_horizon = INT64_C(7) * 24 * 60 * 60 * AV_TIME_BASE;
     } else if (range_kind == REFPLAYER_RTSP_RANGE_CLOCK &&
                range_start != AV_NOPTS_VALUE &&
                range_end != AV_NOPTS_VALUE &&
