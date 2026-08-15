@@ -14,8 +14,12 @@
 #include "libavutil/avassert.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/mem.h"
+#include "libavutil/opt.h"
+#include "libavformat/demux.h"
 #include "libavformat/rtpdec_formats.h"
 #include "libavformat/rtsp.h"
+
+extern const FFInputFormat ff_rtsp_demuxer;
 
 static void parse(RTSPMessageHeader *reply, RTSPState *rt, const char *line)
 {
@@ -159,6 +163,22 @@ static void test_mpegts_depacketizer_has_seek_reset(void)
     av_free(context);
 }
 
+static void test_negotiated_lower_transport_is_exported(void)
+{
+    RTSPState rt = {
+        .class = ff_rtsp_demuxer.p.priv_class,
+        .lower_transport = RTSP_LOWER_TRANSPORT_TCP,
+    };
+    int64_t value = -1;
+
+    av_assert0(av_opt_get_int(&rt, "refplayer_rtsp_lower_transport",
+                              0, &value) == 0);
+    av_assert0(value == RTSP_LOWER_TRANSPORT_TCP);
+    av_assert0(av_opt_set_int(&rt, "refplayer_rtsp_lower_transport",
+                              RTSP_LOWER_TRANSPORT_UDP, 0) < 0);
+    av_assert0(rt.lower_transport == RTSP_LOWER_TRANSPORT_TCP);
+}
+
 int main(void)
 {
     test_hms();
@@ -170,5 +190,6 @@ int main(void)
     test_3gpp_interval_and_depth();
     test_typed_seek_range_serialization();
     test_mpegts_depacketizer_has_seek_reset();
+    test_negotiated_lower_transport_is_exported();
     return 0;
 }
